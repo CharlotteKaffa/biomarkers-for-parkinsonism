@@ -1,0 +1,413 @@
+---
+title: "Biomarkers for parkinsonism "
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r libraries}
+library(readxl)
+library(randomForest)
+library(pROC)
+library(plyr)
+library(ggpubr)
+library(reshape2)
+library(gridExtra)
+library(rpart)
+library(caret)
+library(data.table)
+library(rpart.plot)
+library(rowr)
+library(Amelia)
+library(tree)
+library(reprtree)
+```
+
+```{r files, echo = FALSE}
+basedir <- "/project-folder/"
+
+protein_ratios <- as.data.frame(read_xlsx(paste0(basedir, "codes_and_ratio.xlsx"), sheet = "code_and_ratio")) # No empty cells
+clinical_variables <- as.data.frame(read_excel(paste0(basedir, "variables_and_other_markers.xlsx"), sheet = "selection_of_variables")) # 335 empty cells
+biochemical_variables <- as.data.frame(read_excel(paste0(basedir, "variables_and_biochemical_markers.xlsx"), sheet = "selection_of_variables")) # 52 empty cells
+```
+
+```{r data transformation}
+clinical_variables$I_Hoehn_and_Yahr_score <- gsub("stage ", "", clinical_variables$I_Hoehn_and_Yahr_score)
+clinical_variables$I_Hoehn_and_Yahr_score <- gsub(",", ".", clinical_variables$I_Hoehn_and_Yahr_score)
+clinical_variables$I_NO_clapping_spontaneous <- gsub("25", "twentyfive", clinical_variables$I_NO_clapping_spontaneous)
+clinical_variables$I_NO_clapping_spontaneous <- gsub("3", "three", clinical_variables$I_NO_clapping_spontaneous)
+clinical_variables$I_NO_clapping_command <- gsub("3", "three", clinical_variables$I_NO_clapping_command)
+clinical_variables$I_NO_nystagmus <- gsub("1st", "first", clinical_variables$I_NO_nystagmus)
+clinical_variables$I_NO_tandemgait <- gsub("1", "one", clinical_variables$I_NO_tandemgait)
+clinical_variables$I_NO_tandemgait <- gsub("2", "two", clinical_variables$I_NO_tandemgait)
+clinical_variables$I_NO_tandemgait <- gsub("4", "four", clinical_variables$I_NO_tandemgait)
+clinical_variables$I_NO_palmomental <- gsub("2", "two", clinical_variables$I_NO_palmomental)
+clinical_variables$I_status <- gsub("ON", "on", clinical_variables$I_status)
+clinical_variables$I_status <- gsub("OFF", "off", clinical_variables$I_status)
+clinical_variables$I_Hyposmia <- gsub("unkown", "unknown", clinical_variables$I_Hyposmia)
+
+```
+
+```{r imputation}
+#which(is.na(dataset)) check which cells are empty
+protein_ratios_imp <- amelia(protein_ratios[, -c(1)], m = 1, parallel = "multicore", nom = c("Diagnostic", "Diagnostic_APDcombined"), empri = 10)
+protein_ratios_imp$imputations$imp1$code_CSF_aliquots <- protein_ratios$code_CSF_aliquots
+protein_ratios <- protein_ratios_imp$imputations$imp1
+col_idx <- grep("code_CSF_aliquots", names(protein_ratios))
+protein_ratios <- protein_ratios[, c(col_idx, (1:ncol(protein_ratios))[-col_idx])]
+protein_ratios <- protein_ratios[-87,]
+
+clinical_variables_imp <- amelia(clinical_variables[, -c(1,51)], m = 1, parallel = "multicore", noms = c("Diagn9_2018", "Diagn9_combined", "Sex", "I_Presenting_symptom", "I_Course_of_disease", "I_Use_walkingstick", "I_Use_walker", "I_Use_wheelchair", "I_Disease_stage", "I_Cognitive_dysfunction", "I_Falls", "I_Frequency_falls", "I_Restingtremor", "I_Depression", "I_Quick_progression", "I_Myoclonus", "I_Dystonia", "I_Family_history", "I_Hyposmia", "I_BPPD", "I_Fluctuations", "I_Hypophonia", "I_Nighttime_stridor", "I_Hypersalivation", "I_Bicycle", "I_Home", "I_Care", "I_Urge_incontinence", "I_Stress_incontinence", "I_Urgency", "I_Urinary_retention", "I_Fecal_incontinence", "I_Orthostatic_hypotension", "I_Cold_extremities", "I_Dysphagia", "I_Medication_first", "I_Current_use_PD_medication", "I_Antidepressiva", "I_NO_pillroll_tremor", "I_NO_Myoclonus", "I_NO_dystonia", "I_NO_dyskinesia", "I_NO_Pathological_reflexes", "I_NO_saccadic_intrusions", "I_NO_under_or_overshoot", "I_NO_slow_saccades", "I_NO_multistep_saccades", "I_NO_supranuclear_palsy", "I_NO_oculocephalic_reflex", "I_NO_nystagmus", "I_NO_dysarthria_cerebellar", "I_NO_TTP", "I_NO_VVP", "I_NO_KHP", "I_NO_tandemgait", "I_NO_graspreflex", "I_NO_palmomental", "I_NO_snout", "I_NO_glabellar", "I_NO_masseter", "I_NO_clapping_spontaneous", "I_NO_clapping_command", "I_Hoehn_and_Yahr_score", "I_status","RTQ_posneg"), empri = 380)
+clinical_variables$I_NO_romberg <- "normal"
+clinical_variables_imp$imputations$imp1$I_NO_romberg <- clinical_variables$I_NO_romberg
+clinical_variables_imp$imputations$imp1$code_CSF_aliquots <- clinical_variables$code_CSF_aliquots
+clinical_variables <- clinical_variables_imp$imputations$imp1
+col_idx <- grep("code_CSF_aliquots", names(clinical_variables))
+clinical_variables <- clinical_variables[, c(col_idx, (1:ncol(clinical_variables))[-col_idx])]
+
+biochemical_variables_imp <- amelia(biochemical_variables[, -c(1)], m = 1, parallel = "multicore", noms = c("Diagn9_2018", "Diagn9_combined", "Sex", "RTQ_posneg"), empri = 60)
+biochemical_variables_imp$imputations$imp1$code_CSF_aliquots <- biochemical_variables$code_CSF_aliquots
+biochemical_variables <- biochemical_variables_imp$imputations$imp1
+col_idx <- grep("code_CSF_aliquots", names(biochemical_variables))
+biochemical_variables <- biochemical_variables[, c(col_idx, (1:ncol(biochemical_variables))[-col_idx])]
+
+```
+
+```{r normalization}
+protein_ratios$d <- with(protein_ratios, 100 / total_protein_ug_uL)
+transformed_ratios <- as.data.frame(apply(protein_ratios[,4:36], 2, function(x) x <- x * protein_ratios$d))
+donors <- protein_ratios[,1:3]
+t_ratios <- cbind(donors, transformed_ratios)
+
+
+clinical_variables$d <- with(clinical_variables, 100 / total_protein_ug_uL)
+transformed_ratios <- as.data.frame(apply(clinical_variables[,144:176], 2, function(x) x <- x * clinical_variables$d))
+donors_clinical <- clinical_variables[,1:143]
+t_clinical <- cbind(donors_clinical, transformed_ratios)
+
+```
+
+```{r random forest}
+random_forest <- function(data, diaggroup, drop, dataname){
+  dat <- data
+  dat$d <- NULL
+  dat <- dat[apply(dat, 2, function(p) dim(table(p)) !=1)]
+  dat <- dat[, -1]
+  dat <- as.data.frame(unclass(dat))
+  
+  if (diaggroup == "Diagnostic"){
+    f <- Diagnostic ~ .
+    l <- -2
+  }
+  if (diaggroup == "Diagnostic_APDcombined"){
+    f <- Diagnostic_APDcombined ~ .
+    l <- -1
+  }
+  if (diaggroup == "Diagn9_2018"){
+    f <- Diagn9_2018 ~ .
+    l <- -2
+  }
+  if (diaggroup == "Diagn9_combined"){
+    f <- Diagn9_combined ~ .
+    l <- -1
+  }
+  
+  if (drop == "Control"){
+    dat <- dat[grep("PD|MSA|PSP", dat$Diagnostic),]
+    dat <- droplevels(dat, "Control")
+    drop = "_no_control"
+  }
+
+  rf <- randomForest(f, data=dat[, l], ntree=1000, proximity=T)
+  tree <- reprtree::ReprTree(rf, dat[, l])
+  png(filename = paste0(basedir, "rf_tree", dataname, "_", diaggroup, drop, ".png"), width = 1000, height = 1000)
+  plot(tree)
+  dev.off()
+  if (length(levels(dat[,diaggroup])) == 2){
+    roc <- roc(dat[,diaggroup], rf$votes[,2])
+    png(filename = paste0(basedir, "ROC_", dataname, "_", diaggroup, drop,".png"))
+    plot.roc(roc, print.auc = T)
+    dev.off()
+  } else {
+    roc <- multiclass.roc(dat[,diaggroup], rf$votes[,2])
+    rs <- roc[["rocs"]]
+    png(filename = paste0(basedir, "ROC_", dataname, "_", diaggroup, drop,".png"))
+    plot.roc(rs[[1]], print.auc = T)
+    dev.off()
+  }
+  auc <- auc(roc)
+  rf <- as.data.frame(round(importance(rf), 2))
+  rf <- rf[order(-rf$MeanDecreaseGini), , drop=FALSE]
+  write.table(rf, paste0(basedir, "rf_", dataname, "_", diaggroup, drop, ".txt"), quote = F, col.names = NA, sep = "\t")
+
+  list(auc = auc, rf = rf)
+}
+
+```
+
+```{r boxplots}
+boxplots <- function(data, diaggroup, dataname){
+  mdat <- as.data.frame(data)
+  
+  pg <- levels(as.factor(mdat[,diaggroup]))
+  pg_l <- list()
+  pg <- sort(unique(pg))
+  for (cond1 in pg[seq(1,length(pg)-1)]) {
+    cond1_index <- (match(cond1, pg))
+    for (cond2 in pg[seq(cond1_index+1, length(pg))])
+      pg_l <- append(pg_l, paste0(cond1," ",cond2))
+  }
+  l <- list()  
+  for (i in pg_l){
+    i <- strsplit(i, split = " ")
+    l <- append(l, i)
+  }
+  
+  if (diaggroup == "Diagnostic" || diaggroup == "Diagn9_2018"){
+    select = -3
+  } else{
+    select = -2
+  }
+  
+  mdat$total_protein_ug_uL <- NULL
+    
+  mdat<- melt(mdat[,select],id.var = c('code_CSF_aliquots', diaggroup), value.name="ratio",variable.name="value")
+  
+  for (i in unique(mdat$value)){
+    tp <- mdat[mdat$value %in% i,]
+    if (!grepl("[^a-z\\/\\ \\,\\>-]", tp$ratio[1])){
+      tp <- as.data.frame(unclass(tp))
+      lv <- as.data.frame(levels(tp$ratio))
+      lv$num <- as.numeric(lv$`levels(tp$ratio)`)
+      tp_i <- tp
+      tp_i$ratio <- as.numeric(tp_i$ratio)
+    } else {
+      tp_i <- tp
+      tp_i$ratio <- as.integer(tp_i$ratio)
+    }
+    p <- ggplot(tp_i,aes(x=tp[,diaggroup], y = ratio))
+    p <- p + geom_boxplot(position=position_dodge(width=0.9), outlier.colour = NA)
+    p <- p + geom_text(aes(label=code_CSF_aliquots), position = position_jitter(width=0.4),size=5,adj=-0.1)
+    p <- p + geom_vline(xintercept = c(1.5, 2.5, 3.5),col="red",lty=2)
+    p <- p + theme_bw()
+    p <- p + facet_grid(.~value)
+    p <- p + stat_compare_means(comparisons = l, method = "t.test")
+    p <- p + theme(strip.text.x = element_text(size=14))
+    if (!grepl("[^a-z\\/\\ \\,\\>-]", tp$ratio[1])){
+      lv <- tableGrob(lv)
+      p <- grid.arrange(p , arrangeGrob(lv), ncol = 2)
+    }
+    png(filename = paste0(basedir, "boxplots/", dataname, "_", diaggroup, "_" , i, ".png"))
+    plot(p)
+    dev.off()
+  }
+
+  for (i in unique(mdat$value)){
+    tp <- mdat[mdat$value %in% i,]
+    if (!grepl("[^a-z\\/\\ \\,\\>-]", tp$ratio[1])){
+      tp <- as.data.frame(unclass(tp))
+      lv <- as.data.frame(levels(tp$ratio))
+      lv$num <- as.numeric(lv$`levels(tp$ratio)`)
+      tp_i <- tp
+      tp_i$ratio <- as.numeric(tp_i$ratio)
+    } else {
+      tp_i <- tp
+      tp_i$ratio <- as.integer(tp_i$ratio)
+    }
+    p <- ggplot(tp_i,aes(x=tp[,diaggroup], y = ratio))
+    p <- p + geom_boxplot(position=position_dodge(width=0.9), outlier.colour = "red")
+    p <- p + geom_vline(xintercept = c(1.5, 2.5, 3.5),col="red",lty=2)
+    p <- p + theme_bw()
+    p <- p + facet_grid(.~value)
+    p <- p + stat_compare_means(comparisons = l, method = "t.test")
+    p <- p + theme(strip.text.x = element_text(size=14))
+    if (!grepl("[^a-z\\/\\ \\,\\>-]", tp$ratio[1])){
+      lv <- tableGrob(lv)
+      p <- grid.arrange(p , arrangeGrob(lv), ncol = 2)
+    }
+    png(filename = paste0(basedir, "boxplots/", dataname, "_", diaggroup, "_" , i, "_clean.png"))
+    plot(p)
+    dev.off()
+  }
+
+}
+```
+
+```{r trees}
+tree <- function(data, diaggroup, drop, dataname, ms){
+dat <- as.data.frame(data)
+
+if (drop == "Control"){
+  dat <- dat[grep("PD|MSA|PSP", dat$Diagnostic),]
+  dat <- droplevels(dat, "Control")
+  drop = "_no_control"
+}
+dat$code_CSF_aliquots <- NULL
+rownames(dat) <- NULL
+
+if (diaggroup == "Diagnostic" || diaggroup == "Diagn9_2018"){
+  select = 2
+} else{
+  select = 1
+}
+
+set.seed(1234)
+n <- nrow(dat)
+shuffled <- dat[sample(n),]
+shuffled <- shuffled[,-select]
+train.data <- shuffled[1:round(0.7 * n),]
+test.data <- shuffled[(round(0.7 * n) + 1):n,]
+
+if (diaggroup == "Diagnostic"){
+  f <- Diagnostic ~ .
+}
+if (diaggroup == "Diagnostic_APDcombined"){
+  f <- Diagnostic_APDcombined ~ .
+}
+if (diaggroup == "Diagn9_2018"){
+  f <- Diagn9_2018 ~ .
+}
+if (diaggroup == "Diagn9_combined"){
+  f <- Diagn9_combined ~ .
+}
+
+if (dataname == "clinical" || dataname == "clinical_no_norm"){
+  train.data$I_Hyposmia <- factor(train.data$I_Hyposmia, levels = c(levels(train.data$I_Hyposmia), "yes, severe/anosmia", "no", "unknown", "yes, mild/moderate"))
+  train.data$I_Fluctuations <- factor(train.data$I_Fluctuations, levels = c(levels(train.data$I_Fluctuations), "unknown", "no"))
+  train.data$I_Antidepressiva <- factor(train.data$I_Antidepressiva, levels = c(levels(train.data$I_Antidepressiva),  "no", "Yes, other", "Yes, SSRI", "Yes, TCA"))
+  train.data$I_NO_oculocephalic_reflex <- factor(train.data$I_NO_oculocephalic_reflex, levels = c(levels(train.data$I_NO_oculocephalic_reflex), "abnormal", "normal"))
+  train.data$I_NO_graspreflex <- factor(train.data$I_NO_graspreflex, levels = c(levels(train.data$I_NO_graspreflex), "normal","present"))
+  train.data$I_Hoehn_and_Yahr_score <- factor(train.data$I_Hoehn_and_Yahr_score, levels = c(levels(train.data$I_Hoehn_and_Yahr_score), "0", "1", "1.5", "2", "2.5", "3", "4"))
+  train.data$RTQ_posneg <- factor(train.data$RTQ_posneg, levels = c(levels(train.data$RTQ_posneg), "equivocal", "positive", "negative"))
+  train.data$I_Medication_first <- factor(train.data$I_Medication_first, levels = c(levels(train.data$I_Medication_first), "dopa-agonist", "l-dopa", "no medication", "other", "symmetrel"))
+  train.data$I_NO_clapping_command <- factor(train.data$I_NO_clapping_command, levels = c(levels(train.data$I_NO_clapping_command), ">three claps", "exact imitation", "normal"))
+}
+
+if (dataname == "biochemical"){
+  train.data$RTQ_posneg <- factor(train.data$RTQ_posneg, levels = c(levels(train.data$RTQ_posneg), "equivocal", "positive", "negative"))
+}
+
+tree <- rpart(f, data = train.data, control = rpart.control(minsplit = ms))
+pred <- predict(tree, test.data,type="class")
+pred2 <- predict(tree, test.data)
+
+tryCatch({
+  acc <- confusionMatrix(table(test.data[,diaggroup],pred))
+},
+error = function(e) {
+  print (noquote("More than 2 levels, no sensitivity and specificity analysis available"))
+})
+
+if (diaggroup == "Diagnostic" || diaggroup == "Diagn9_2018"){
+  select = 3
+} else{
+  select = 2
+}
+
+tmpdat <- as.data.table(data[,-select])
+tmpdat$row <- rownames(tmpdat)
+setkey(tmpdat, row)
+
+predd <- melt(pred2) 
+predd <- cbind(pred2, Clinical = as.character(test.data[,diaggroup]))
+predd <- as.data.frame(predd)
+predd$Donor <- rownames(predd)
+predd$Donor <- tmpdat[predd$Donor]$code_CSF_aliquots
+
+
+svg(filename = paste0(basedir, "trees/minsplit_", ms, "/", "tree_", dataname, "_", diaggroup, drop, ".svg"), width=10,height=10)
+p <- rpart.plot(tree, extra=101, fallen.leaves = T, yesno=2)
+dev.off()
+
+
+write.table(acc$table, paste0(basedir, "trees/minsplit_", ms, "/", "acc_table_", dataname, "_", diaggroup, drop, ".txt"), sep = "\t", quote = F,  col.names = NA)
+write.table(acc$overall, paste0(basedir, "trees/minsplit_", ms, "/", "acc_overall_", dataname, "_", diaggroup, drop, ".txt"), sep = "\t", quote = F,  col.names = NA)
+}
+
+```
+
+```{r pca}
+library(factoextra)
+pca <- function(data, diaggroup, dataname){
+  mdat <- data
+  mdat$total_protein_ug_uL <- NULL
+  if (diaggroup == "Diagnostic" || diaggroup == "Diagn9_2018"){
+  select = 3
+} else{
+  select = 2
+}
+  mdat[,select] <- NULL
+  dat <- mdat[,1:2]
+  mdat <- as.data.frame(apply(mdat[, -c(1:2)], 2, function(x) if (typeof(x[1]) == "character") as.numeric(as.factor(x)) else as.numeric(x)))
+  mdat <- cbind(dat, mdat)
+  png(paste0(basedir, "pca_", dataname, "_", diaggroup, ".png"), height = 1000, width = 1000)
+  pca <- prcomp(mdat[, -c(1:2)])
+  d <- fviz_pca_ind(pca, geom.ind = "point", pointshape = 21,
+               pointsize = 2, fill.ind = mdat[,diaggroup],              col.ind = "black",
+             palette = "jco",
+             addEllipses = TRUE,
+             label = "var",
+             col.var = "black",
+             repel = TRUE,
+             legend.title = "Diagnosis")
+  plot(d)
+  dev.off()
+}
+```
+
+```{r run all analyses}
+# RANDOM FOREST
+rf_r_d <- random_forest(data = t_ratios, diaggroup = "Diagnostic", drop = "", dataname = "ratios")
+rf_r_d_nc <- random_forest(data = t_ratios, diaggroup = "Diagnostic", drop = "Control", dataname = "ratios")
+rf_r_d_apd <- random_forest(data = t_ratios, diaggroup = "Diagnostic_APDcombined", drop = "", dataname = "ratios")
+rf_r_d_apd_nc <- random_forest(data = t_ratios, diaggroup = "Diagnostic_APDcombined", drop = "Control", dataname = "ratios")
+rf_c_d <- random_forest(data = t_clinical, diaggroup = "Diagn9_2018", drop = "", dataname = "clinical")
+rf_c_d_apd <- random_forest(data = t_clinical, diaggroup = "Diagn9_combined", drop = "", dataname = "clinical")
+rf_b_d <- random_forest(data = biochemical_variables, diaggroup = "Diagn9_2018", drop = "", dataname = "biochemical")
+rf_b_d_apd <- random_forest(data = biochemical_variables, diaggroup = "Diagn9_combined", drop = "", dataname = "biochemical")
+
+rf_r_nn_d <- random_forest(data = protein_ratios, diaggroup = "Diagnostic", drop = "", dataname = "ratios_no_norm")
+rf_r_nn_d_nc <- random_forest(data = protein_ratios, diaggroup = "Diagnostic", drop = "Control", dataname = "ratios_no_norm")
+rf_r_nn_d_apd <- random_forest(data = protein_ratios, diaggroup = "Diagnostic_APDcombined", drop = "", dataname = "ratios_no_norm")
+rf_r_nn_d_apd_nc <- random_forest(data = protein_ratios, diaggroup = "Diagnostic_APDcombined", drop = "Control", dataname = "ratios_no_norm")
+rf_c_nn_d <- random_forest(data = clinical_variables, diaggroup = "Diagn9_2018", drop = "", dataname = "clinical_no_norm")
+rf_c_nn_d_apd <- random_forest(data = clinical_variables, diaggroup = "Diagn9_combined", drop = "", dataname = "clinical_no_norm")
+
+# BOXPLOTS
+bp_r_d <- boxplots(data = t_ratios, diaggroup = "Diagnostic", dataname = "ratios")
+bp_r_d_apd <- boxplots(data = t_ratios, diaggroup = "Diagnostic_APDcombined", dataname = "ratios")
+bp_c_d <- boxplots(data = t_clinical, diaggroup = "Diagn9_2018", dataname = "clinical")
+bp_c_d_apd <- boxplots(data = t_clinical, diaggroup = "Diagn9_combined", dataname = "clinical")
+bp_b_d <- boxplots(data = biochemical_variables, diaggroup = "Diagn9_2018", dataname = "biochemical")
+bp_b_d_apd <- boxplots(data = biochemical_variables, diaggroup = "Diagn9_combined", dataname = "biochemical")
+
+bp_r_nn_d <- boxplots(data = protein_ratios, diaggroup = "Diagnostic", dataname = "ratios_no_norm")
+bp_r_nn_d_apd <- boxplots(data = protein_ratios, diaggroup = "Diagnostic_APDcombined", dataname = "ratios_no_norm")
+bp_c_nn_d <- boxplots(data = clinical_variables, diaggroup = "Diagn9_2018", dataname = "clinical_no_norm")
+bp_c_nn_d_apd <- boxplots(data = clinical_variables, diaggroup = "Diagn9_combined", dataname = "clinical_no_norm")
+
+# PCA
+pca_r_d <- pca(data = t_ratios, diaggroup = "Diagnostic", dataname = "ratios")
+pca_r_d_apd <- pca(data = t_ratios, diaggroup = "Diagnostic_APDcombined", dataname = "ratios")
+pca_c_d <- pca(data = t_clinical, diaggroup = "Diagn9_2018", dataname = "clinical")
+pca_c_d_apd <- pca(data = t_clinical, diaggroup = "Diagn9_combined", dataname = "clinical")
+pca_b_d <- pca(data = biochemical_variables, diaggroup = "Diagn9_2018", dataname = "biochemical")
+pca_b_d_apd <- pca(data = biochemical_variables, diaggroup = "Diagn9_combined", dataname = "biochemical")
+
+pca_r_nn_d <- pca(data = protein_ratios, diaggroup = "Diagnostic", dataname = "ratios_no_norm")
+pca_r_nn_d_apd <- pca(data = protein_ratios, diaggroup = "Diagnostic_APDcombined", dataname = "ratios_no_norm")
+pca_c_nn_d <- pca(data = clinical_variables, diaggroup = "Diagn9_2018", dataname = "clinical_no_norm")
+pca_c_nn_d_apd <- pca(data = clinical_variables, diaggroup = "Diagn9_combined", dataname = "clinical_no_norm")
+
+```
+
+```{r random forest results overview}
+overview <- data.frame("AUC" = c(rf_r_d$auc, rf_r_d_nc$auc, rf_r_d_apd$auc, rf_r_d_apd_nc$auc, rf_c_d$auc, rf_c_d_apd$auc, rf_b_d$auc, rf_b_d_apd$auc, rf_r_nn_d$auc, rf_r_nn_d_nc$auc, rf_r_nn_d_apd$auc, rf_r_nn_d_apd_nc$auc, rf_c_nn_d$auc, rf_c_nn_d_apd$auc), "Attribute" = c(rownames(rf_r_d$rf)[1], rownames(rf_r_d_nc$rf)[1], rownames(rf_r_d_apd$rf)[1], rownames(rf_r_d_apd_nc$rf)[1], rownames(rf_c_d$rf)[1], rownames(rf_c_d_apd$rf)[1], rownames(rf_b_d$rf)[1], rownames(rf_b_d_apd$rf)[1], rownames(rf_r_nn_d$rf)[1], rownames(rf_r_nn_d_nc$rf)[1], rownames(rf_r_nn_d_apd$rf)[1], rownames(rf_r_nn_d_apd_nc$rf)[1], rownames(rf_c_nn_d$rf)[1], rownames(rf_c_nn_d_apd$rf)[1]), "MeanDecreaseGini" = c(rf_r_d$rf$MeanDecreaseGini[1], rf_r_d_nc$rf$MeanDecreaseGini[1], rf_r_d_apd$rf$MeanDecreaseGini[1], rf_r_d_apd_nc$rf$MeanDecreaseGini[1], rf_c_d$rf$MeanDecreaseGini[1], rf_c_d_apd$rf$MeanDecreaseGini[1], rf_b_d$rf$MeanDecreaseGini[1], rf_b_d_apd$rf$MeanDecreaseGini[1], rf_r_nn_d$rf$MeanDecreaseGini[1], rf_r_nn_d_nc$rf$MeanDecreaseGini[1], rf_r_nn_d_apd$rf$MeanDecreaseGini[1], rf_r_nn_d_apd_nc$rf$MeanDecreaseGini[1], rf_c_nn_d$rf$MeanDecreaseGini[1], rf_c_nn_d_apd$rf$MeanDecreaseGini[1]))
+
+rownames(overview) <- c("ratios_diagnostic", "ratios_diagnostic_nocontrols", "ratios_diagnostic_apdcombined", "ratios_diagnostic_apdcombined_nocontrols", "clinical_diagnostic", "clinical_diagnostic_apdcombined", "biochemical_diagnostic", "biochemical_diagnostic_apdcombined", "ratios_no_norm_diagnostic", "ratios_no_norm_diagnostic_nocontrols", "ratios_no_norm_diagnostic_apdcombined", "ratios_no_norm_diagnostic_apdcombined_nocontrols", "clinical_no_norm_diagnostic", "clinical_no_norm_diagnostic_apdcombined")
+
+write.table(overview, paste0(basedir, "roc_auc_gini.txt"), sep = "\t", col.names = NA,  quote = F)
+
+print(overview)
+```
